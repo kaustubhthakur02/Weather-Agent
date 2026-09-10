@@ -5,9 +5,26 @@ import requests
 from dotenv import load_dotenv
 from openai import OpenAI
 
-from prompt import SYSTEM_PROMPT
+from typing import Literal, Union
 
+from prompt import SYSTEM_PROMPT
+from pydantic import BaseModel, TypeAdapter, ValidationError
 load_dotenv()
+
+
+class ContentStep(BaseModel):
+    step: Literal["START", "PLAN", "OUTPUT"]
+    content: str
+
+
+class ToolStep(BaseModel):
+    step: Literal["TOOL"]
+    tool: Literal["get_weather"]
+    input: str
+
+
+AgentStep = Union[ContentStep, ToolStep]
+agent_step_adapter = TypeAdapter(AgentStep)
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
@@ -40,23 +57,28 @@ def run_agent(query: str, model: str = "gpt-5.5", on_step=None) -> str:
             messages=messages,
         )
         content = response.choices[0].message.content
-        parsed = json.loads(content)
         messages.append({"role": "assistant", "content": content})
 
+        try:
+            parsed = agent_step_adapter.validate_json(content)
+        except ValidationError as e:
+            observation = {"step": "OBSERVE", "content": f"Error: malformed step from model: {e}"}
+            if on_step:
+                on_step(observation)
+            messages.append({"role": "user", "content": json.dumps(observation)})
+            continue
+
         if on_step:
-            on_step(parsed)
+            on_step(parsed.model_dump())
 
-        if parsed["step"] == "OUTPUT":
-            return parsed["content"]
+        if parsed.step == "OUTPUT":
+            return parsed.content
 
-        if parsed["step"] == "TOOL":
-            tool_name = parsed.get("tool")
-            tool_input = parsed.get("input")
-
-            if tool_name == "get_weather":
-                result = get_weather(tool_input)
+        if parsed.step == "TOOL":
+            if parsed.tool == "get_weather":
+                result = get_weather(parsed.input)
             else:
-                result = f"Error: unknown tool '{tool_name}'"
+                result = f"Error: unknown tool '{parsed.tool}'"
 
             observation = {"step": "OBSERVE", "content": result}
             if on_step:
